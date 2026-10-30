@@ -1,0 +1,3 @@
+# slam_toolbox pose-graph serialization (tens of MB). Regenerate with the serialize_map service.
+maps/*.posegraph
+maps/*.data
