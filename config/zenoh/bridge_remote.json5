@@ -1,0 +1,30 @@
+// zenoh-bridge-ros2dds — lado REMOTO (Laboratorio_UPV, donde corre la simulacion).
+// Escucha solo en loopback: se alcanza unicamente a traves de `ssh -L 7447:127.0.0.1:7447`.
+// Reenvia solo lo necesario para ver RViz; la nube del Helios va submuestreada (points_viz).
+{
+  mode: "router",
+  listen: { endpoints: ["tcp/127.0.0.1:7447"] },
+  scouting: { multicast: { enabled: false } },
+  plugins: {
+    ros2dds: {
+      domain: 0,
+      allow: {
+        // DDS publishers de este lado que se exponen
+        publishers: [
+          "/clock", "/tf", "/tf_static",
+          "/caddy_ai2/sick_lms_291/scan",
+          "/caddy_ai2/rs_helios_5515/points_viz",
+          "/planner_node/astar/path",
+          "/localizer_node/amcl/particles",
+        ],
+        // DDS subscribers de este lado alimentados desde el PC local (goal e initialpose de RViz)
+        subscribers: ["/goal_pose", "/initialpose"],
+      },
+      pub_max_frequencies: [
+        "/tf=20",
+        "/caddy_ai2/sick_lms_291/scan=10",
+        "/caddy_ai2/rs_helios_5515/points_viz=5",
+      ],
+    },
+  },
+}

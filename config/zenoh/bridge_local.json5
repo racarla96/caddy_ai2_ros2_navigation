@@ -1,0 +1,24 @@
+// zenoh-bridge-ros2dds — lado LOCAL (tu PC). Se conecta al puente remoto por el tunel SSH.
+// Requiere:  ssh -N -L 7447:127.0.0.1:7447 Laboratorio_UPV
+{
+  mode: "client",
+  connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+  scouting: { multicast: { enabled: false } },
+  plugins: {
+    ros2dds: {
+      domain: 0,
+      allow: {
+        // topics a los que se suscribe RViz en este PC
+        subscribers: [
+          "/clock", "/tf", "/tf_static",
+          "/caddy_ai2/sick_lms_291/scan",
+          "/caddy_ai2/rs_helios_5515/points_viz",
+          "/planner_node/astar/path",
+          "/localizer_node/amcl/particles",
+        ],
+        // lo que RViz publica hacia el remoto
+        publishers: ["/goal_pose", "/initialpose"],
+      },
+    },
+  },
+}
