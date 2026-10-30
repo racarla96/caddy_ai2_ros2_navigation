@@ -2,7 +2,7 @@
 
 Paquete de navegación autónoma para el robot agrícola **Caddy AI2** (cinemática Ackermann).
 
-**Stack:** ROS 2 Jazzy · Gazebo Harmonic · Nav2 · slam_toolbox
+**Stack:** ROS 2 Jazzy · Gazebo Harmonic · EasyNav 0.5.0 · slam_toolbox
 
 ---
 
@@ -12,8 +12,8 @@ Permite que el robot navegue de forma autónoma dándole un destino en el mapa.
 Para ello necesita tres cosas:
 
 1. **Un mapa del entorno** — construido con SLAM (una sola vez).
-2. **Saber dónde está** — localización con AMCL (cada vez que arranca).
-3. **Planificar y ejecutar la ruta** — Nav2 (siempre que navega).
+2. **Saber dónde está** — localización AMCL de EasyNav (cada vez que arranca).
+3. **Planificar y ejecutar la ruta** — EasyNav (siempre que navega).
 
 ---
 
@@ -38,10 +38,11 @@ para estimar dónde está el robot dentro del mapa.
 > **Analogía:** es como abrir los ojos en tu casa ya conocida y orientarte
 > mirando los muebles para saber en qué habitación estás.
 
-### ¿Qué es Nav2?
+### ¿Qué es EasyNav?
 
-Nav2 es el stack de navegación de ROS 2. Con el mapa y la posición del robot,
-calcula la ruta óptima hasta el destino y envía comandos de velocidad al robot.
+EasyNav es el stack de navegación que sustituye a Nav2. Con el mapa y la posición
+del robot calcula la ruta (A*) y envía comandos de velocidad (Regulated Pure Pursuit).
+**No hace SLAM**: para construir el mapa se sigue usando `slam_toolbox`.
 
 ### El árbol de transformadas (TF)
 
@@ -61,19 +62,34 @@ AMCL  Odometría (controlador o EKF)
 
 ## Instalación de dependencias
 
-```bash
-sudo apt install ros-jazzy-twist-stamper
-```
+EasyNav 0.5.0 se compila desde fuente dentro de este workspace (el APT de Jazzy
+todavía instala la 0.4.0). Los repos viven en `src/easynav/`:
 
-Compilar el paquete:
+| Repo | Tag |
+|---|---|
+| EasyNavigation/EasyNavigation | 0.5.0 |
+| EasyNavigation/easynav_plugins | 0.5.0 |
+| EasyNavigation/NavMap | 0.6.0 |
+| fmrico/yaets | 1.2.0 |
 
 ```bash
 cd ~/ws_ros2_simulation
-colcon build --packages-select caddy_ai2_ros2_navigation
+# Si tienes un virtualenv activo (p. ej. opencv), desactívalo: su `empy` rompe la
+# generación de interfaces de ROS.
+deactivate 2>/dev/null
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+               -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 \
+  --packages-up-to easynav_system easynav_costmap_maps_manager \
+    easynav_costmap_localizer easynav_costmap_planner \
+    easynav_regulated_pp_controller easynav_diagnostic_recovery
+colcon build --symlink-install --packages-select caddy_ai2_ros2_navigation
 source install/setup.bash
 ```
 
----
+> `-DOpenCV_DIR=...` evita el OpenCV con CUDA de `/usr/local`, que rompe `find_package(OpenCV)`
+> en `easynav_sensors`. `navmap_tools` (necesita `python3-pyproj`) no se compila porque no se usa.
 
 ## Flujo completo paso a paso
 
@@ -85,7 +101,7 @@ slam.launch.py                 navigation.launch.py
   ├─ Arranca simulación          ├─ Arranca simulación
   ├─ Arranca slam_toolbox        ├─ Carga el mapa guardado
   │                              ├─ Arranca AMCL
-  ├─ Teleoperás el robot         ├─ Arranca Nav2 completo
+  ├─ Teleoperás el robot         ├─ Arranca EasyNav completo
   │   (construye el mapa)        └─ Mandas goals desde RViz
   │
   └─ Guardas el mapa
@@ -186,35 +202,34 @@ Una vez guardados, **cierra la simulación** (Ctrl+C en la terminal del launch).
 
 ```bash
 source ~/ws_ros2_simulation/install/setup.bash
-ros2 launch caddy_ai2_ros2_navigation navigation.launch.py \
-  map:=$(ros2 pkg prefix caddy_ai2_ros2_navigation)/share/caddy_ai2_ros2_navigation/maps/navigation_test.yaml
+ros2 launch caddy_ai2_ros2_sim sim.launch.py world:=navigation_test.sdf nav:=2d
 ```
 
-Esto arranca:
-- Gazebo con la simulación
-- AMCL (localización con el mapa cargado)
-- Nav2 completo (planificador + controlador)
-- twist_stamper (adapta los comandos de Nav2 al controlador del robot)
-- RViz con el panel de navegación
+Por defecto carga `maps/navigation_test.yaml` del propio paquete. Esto arranca:
+- Gazebo con la simulación y el EKF
+- EasyNav (`system_main`): mapa de costes, AMCL, planificador A*, Regulated Pure Pursuit y recovery
 
-### 2.2 Dar la pose inicial al robot en RViz
+Si la simulación ya está en marcha, solo EasyNav: `ros2 launch caddy_ai2_ros2_navigation navigation.launch.py`.
 
-AMCL necesita una estimación inicial de dónde está el robot en el mapa.
+EasyNav publica `TwistStamped` directamente sobre
+`/caddy_ai2/bicycle_steering_controller/reference`, así que ya no hace falta `twist_stamper`.
 
-1. En RViz, haz clic en **"2D Pose Estimate"** (barra superior)
-2. Haz clic en el mapa donde está el robot y arrastra en la dirección a la que mira
-3. Verás las partículas de AMCL (flechas) converger alrededor del robot
+> RViz no se lanza desde este launch. Ábrelo aparte y usa `map`/`odom` como frame fijo.
 
-> Si el robot arranca siempre en la misma posición (origen del mapa), puedes
-> saltarte este paso — AMCL convergerá solo en unos segundos.
+### 2.2 Pose inicial
 
-### 2.3 Mandar un goal de navegación
+La pose inicial por defecto es `(0, 0, 0)` con desviación 0.3 m
+(`localizer_node.costmap.initial_pose` en `config/easynav_params.yaml`).
+Si el robot arranca en otro sitio, usa **2D Pose Estimate** en RViz (topic `/initialpose`).
 
-1. En RViz, haz clic en **"Nav2 Goal"** (o **"2D Nav Goal"**)
-2. Haz clic en el mapa donde quieres que vaya el robot y arrastra para indicar la orientación final
-3. Nav2 calculará la ruta y el robot empezará a moverse
+### 2.3 Mandar un goal
 
-Puedes ver la ruta planificada en RViz como una línea verde.
+En RViz, **2D Goal Pose** (topic `/goal_pose`):
+
+```bash
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: map}, pose: {position: {x: 3.0, y: 2.0}, orientation: {w: 1.0}}}"
+```
 
 ---
 
@@ -235,29 +250,34 @@ Puedes ver la ruta planificada en RViz como una línea verde.
 
 | Argumento | Default | Descripción |
 |---|---|---|
-| `namespace` | `caddy_ai2` | Namespace del robot |
-| `use_sim_time` | `true` | Reloj de Gazebo |
-| `map` | *(vacío)* | **Ruta completa al .yaml del mapa** |
-| `use_slam` | `false` | `true` = SLAM simultáneo en lugar de AMCL |
-| `params_file` | `config/nav2_params.yaml` | Parámetros de Nav2 |
-| `include_sim` | `true` | `false` si la sim ya está corriendo |
-| `use_localization` | `true` | `false` = sin EKF (odometría directa) |
+| `params_file` | `config/easynav_params.yaml` | Parámetros de EasyNav |
+| `map_package` | `caddy_ai2_ros2_navigation` | Paquete cuyo `share/` contiene el mapa |
+| `map_file` | `maps/navigation_test.yaml` | YAML del mapa, relativo a `map_package` |
+
+Solo arranca EasyNav. La simulación y el EKF los lanza `caddy_ai2_ros2_sim sim.launch.py`.
 
 ---
 
 ## Verificación rápida
 
 ```bash
-# ¿Se está publicando el mapa?
-ros2 topic hz /map
-
-# ¿AMCL está publicando la TF map→odom?
-ros2 run tf2_tools view_frames
-# Debe aparecer: map → odom → base_footprint → ...
-
-# ¿Nav2 está activo?
-ros2 topic echo /caddy_ai2/plan --once
+ros2 topic hz /map                                  # durante el SLAM
+ros2 run tf2_tools view_frames                      # map → odom → base_footprint → ...
+ros2 topic echo /caddy_ai2/bicycle_steering_controller/reference   # salida de EasyNav
+ros2 topic echo /diagnostics                        # estado del recovery
 ```
+
+---
+
+## Limitaciones conocidas respecto a Nav2
+
+- **El planificador no es cinemático.** `easynav_costmap_planner` es un A* sobre rejilla;
+  no respeta el radio de giro mínimo (~2 m) como hacía `SmacPlannerHybrid`. Pure Pursuit suaviza
+  el seguimiento (`regulated_linear_scaling_min_radius: 2.0`), pero puede haber giros cerrados.
+- **Sin giro en el sitio:** `use_rotate_to_heading: false`, sin marcha atrás, y se ignora el
+  yaw del goal (`yaw_goal_tolerance: 3.14`).
+- **El robot es un círculo** (`robot_geometry.radius: 1.47`), no el rectángulo 2.66 × 1.23 m.
+  Es conservador en pasillos estrechos.
 
 ---
 
@@ -268,16 +288,46 @@ Gazebo Harmonic
   │  SICK LMS291 scan + odometría de ruedas
   ▼
 [bicycle_steering_controller] ── odom → base_footprint (TF)
-  │  /caddy_ai2/bicycle_steering_controller/odometry
   ▼
-[AMCL] ← mapa cargado + /caddy_ai2/sick_lms_291/scan
-  │  map → odom (TF)
-  ▼
-[Nav2: SmacPlannerHybrid + MPPI Controller]
-  │  /caddy_ai2/cmd_vel (Twist)
-  ▼
-[twist_stamper]
+[EasyNav system_main]
+  ├─ sensors_node      ← /caddy_ai2/sick_lms_291/scan
+  ├─ maps_manager_node ← maps/navigation_test.yaml
+  ├─ localizer_node    (AMCL, publica map → odom)
+  ├─ planner_node      (A*)
+  ├─ controller_node   (Regulated Pure Pursuit)
+  └─ recovery_node
   │  /caddy_ai2/bicycle_steering_controller/reference (TwistStamped)
   ▼
 [bicycle_steering_controller] → Gazebo
 ```
+
+---
+
+## Navegación 3D en el parking (EasyNav + Helios)
+
+Mapas 3D de `easynav_playgrounds` (Bonxai + NavMap, multi-planta), localización NavMap AMCL,
+A* sobre el NavMap y Regulated Pure Pursuit, alimentado por el Helios RS-5515.
+
+```bash
+# Todo en un launch (simulación + EKF + EasyNav 3D), sin pantalla, p. ej. en un servidor:
+ros2 launch caddy_ai2_ros2_sim sim.launch.py \
+  world:=parking_garage.sdf headless:=true nav:=3d
+
+# Si prefieres separarlo: simulación primero y EasyNav 3D después
+ros2 launch caddy_ai2_ros2_sim sim.launch.py world:=parking_garage.sdf headless:=true
+ros2 launch caddy_ai2_ros2_navigation navigation_3d.launch.py
+```
+
+EasyNav tarda ~2 min en publicar `map -> odom` (infla el mapa Bonxai).
+
+- **Pose inicial:** si el robot no arranca en (0, 0) o la odometría ya ha acumulado distancia
+  (reinicios, teletransportes), publica `/initialpose` en `map`. Con `compute_odom_from_tf` el
+  localizador supone que la odometría empieza en el origen del mapa.
+- **Autoimpacto del Helios:** un `pcl_ros::CropBox` quita el cuerpo del Caddy
+  (`points` → `points_filtered`); EasyNav solo consume la nube filtrada.
+- **Altura libre del chasis:** `vehicle_collision_ground_clearance` en `robot_params.yaml`
+  (0,20 m). Con 0 el chasis rozaba la malla del suelo y el robot se quedaba clavado.
+- **RViz remoto en tu PC:** `config/zenoh/` (puente `zenoh-bridge-ros2dds` por `ssh -L 7447`) y
+  `launch/remote_viz.launch.py` (nube submuestreada). Config de RViz: `rviz/navigation_3d_remote.rviz`.
+- **Modelo del parking:** viene de `parking-garage-world` (GPL-3.0). Se cambió su fricción a
+  isótropa (`mu = mu2 = 1.0`); el original tenía `mu2 = 0.1` con `fdir1` vertical.

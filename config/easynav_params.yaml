@@ -1,0 +1,159 @@
+# EasyNav parameters — Caddy AI2 (Ackermann / bicycle kinematics)
+# Robot footprint: 2.66 m long × 1.23 m wide, base at base_footprint
+# LiDAR: SICK LMS291 → /caddy_ai2/sick_lms_291/scan
+# Odometry: odom → base_footprint comes from TF (EKF / bicycle_steering_controller)
+# Velocity output: TwistStamped (cmd_vel_stamped), remapped in navigation.launch.py to
+#   /caddy_ai2/bicycle_steering_controller/reference
+#
+# Stack: costmap maps manager + AMCL localizer + A* planner + Regulated Pure Pursuit.
+# NOTE: easynav_costmap_planner is a plain grid A* — it does NOT enforce the minimum turning
+# radius like Nav2's SmacPlannerHybrid did. Pure Pursuit smooths the path while tracking it.
+
+system_node:
+  ros__parameters:
+    use_sim_time: true
+    use_real_time: false        # no RT kernel setup needed in simulation
+    position_tolerance: 0.25
+    angle_tolerance: 3.14       # Ackermann cannot rotate in place: do not require the goal heading
+    # EasyNav models the robot as a circle. radius = circumscribed circle of the footprint
+    # (sqrt(1.33² + 0.615²)), inscribed_radius = half the width. Tune if it brakes too eagerly.
+    robot_geometry:
+      radius: 1.47
+      inscribed_radius: 0.615
+      height: 1.5
+
+sensors_node:
+  ros__parameters:
+    use_sim_time: true
+    forget_time: 0.5
+    sensors: [sick]
+    perception_default_frame: odom
+    sick:
+      topic: /caddy_ai2/sick_lms_291/scan
+      type: sensor_msgs/msg/LaserScan
+
+maps_manager_node:
+  ros__parameters:
+    use_sim_time: true
+    map_types: [costmap]
+    costmap:
+      freq: 10.0
+      plugin: easynav_costmap_maps_manager/CostmapMapsManager
+      package: caddy_ai2_ros2_navigation      # overridden by the `map_package` launch argument
+      map_path_file: maps/navigation_test.yaml  # overridden by the `map_file` launch argument
+      filters: [obstacles, inflation]
+      obstacles:
+        plugin: easynav_costmap_maps_manager/CostmapMapsManager/ObstaclesFilter
+        min_height: 0.0           # 2D laser: every return is an obstacle, not floor
+      inflation:
+        plugin: easynav_costmap_maps_manager/CostmapMapsManager/InflationFilter
+        inflation_radius: 1.5
+        cost_scaling_factor: 3.0
+
+localizer_node:
+  ros__parameters:
+    use_sim_time: true
+    localizer_types: [costmap]
+    costmap:
+      rt_freq: 50.0
+      freq: 5.0
+      reseed_freq: 1.0
+      plugin: easynav_costmap_localizer/AMCLLocalizer
+      num_particles: 200
+      noise_translation: 0.05
+      noise_rotation: 0.1
+      noise_translation_to_rotation: 0.1
+      min_height: 0.0
+      compute_odom_from_tf: true   # odom → base_footprint from TF, no /odom topic needed
+      initial_pose:
+        x: 0.0
+        y: 0.0
+        yaw: 0.0
+        std_dev_xy: 0.3
+        std_dev_yaw: 0.1
+
+planner_node:
+  ros__parameters:
+    use_sim_time: true
+    planner_types: [astar]
+    astar:
+      freq: 0.5
+      plugin: easynav_costmap_planner/CostmapPlanner
+      cost_factor: 10.0
+      continuous_replan: true
+
+controller_node:
+  ros__parameters:
+    use_sim_time: true
+    use_cmd_vel_stamped: true      # publishes TwistStamped on cmd_vel_stamped
+    robot_limits:
+      max_linear_vel: 1.5          # m/s
+      min_linear_vel: -0.4         # only recoveries reverse (RPP allow_reversing is false)
+      max_angular_vel: 1.0         # rad/s — keep <= v / min_turning_radius at cruise speed
+      max_linear_acc: 2.5
+      max_linear_decel: 2.5
+      max_angular_acc: 3.2
+      max_angular_decel: 3.2
+    controller_types: [rpp]
+    rpp:
+      rt_freq: 30.0
+      plugin: easynav_regulated_pp_controller/RegulatedPurePursuitController
+      use_dynamic_window: false
+      allow_reversing: false
+      # Lookahead (large vehicle, up to 1.5 m/s)
+      lookahead_dist: 2.0
+      min_lookahead_dist: 1.0
+      max_lookahead_dist: 3.5
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: true
+      # Ackermann: never rotate in place
+      use_rotate_to_heading: false
+      # Curvature regulation: slow down below the minimum turning radius (~2 m, see plan doc)
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 2.0
+      regulated_linear_scaling_min_speed: 0.3
+      use_fixed_curvature_lookahead: false
+      curvature_lookahead_dist: 1.5
+      interpolate_curvature_after_goal: false
+      use_obstacle_regulated_linear_velocity_scaling: true
+      obstacle_scaling_dist: 1.0
+      obstacle_scaling_gain: 0.8
+      min_approach_linear_velocity: 0.1
+      approach_velocity_scaling_dist: 1.5
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 3.14
+
+recovery_node:
+  ros__parameters:
+    use_sim_time: true
+    # DiagnosticRecoveryManager without the AMCL relocalize mitigation: it rotates in place,
+    # which an Ackermann vehicle cannot do.
+    recovery_manager:
+      plugin: easynav_diagnostic_recovery/DiagnosticRecoveryManager
+      safety_reflex_types: [collision]
+      collision:
+        plugin: easynav_diagnostic_recovery/CollisionSafetyReflex
+      evaluator_types: [no_path, obstacle_close, controller_stuck]
+      no_path:
+        plugin: easynav_diagnostic_recovery/NoPathEvaluator
+      obstacle_close:
+        plugin: easynav_diagnostic_recovery/ObstacleTooCloseEvaluator
+        safe_distance: 1.5          # from the robot CENTER; the nose is 1.08 m away, default 0.6 never fires
+      controller_stuck:
+        plugin: easynav_diagnostic_recovery/ControllerStuckEvaluator
+      mitigation_types: [retreat, advance, human_assistance, cancel_mission]
+      retreat:
+        plugin: easynav_diagnostic_recovery/SafeRetreatRecovery
+        priority: 5
+        safe_distance: 1.5
+        retreat_speed: 0.3
+      advance:
+        plugin: easynav_diagnostic_recovery/AdvanceRecovery
+        priority: 10
+      human_assistance:
+        plugin: easynav_diagnostic_recovery/HumanAssistanceRecovery
+        priority: 1000
+        timeout: 30.0
+      cancel_mission:
+        plugin: easynav_diagnostic_recovery/CancelMissionRecovery
+        priority: 2000

@@ -1,108 +1,69 @@
 #!/usr/bin/env python3
 """
-Full navigation launch — Caddy AI2.
+2D navigation launch — Caddy AI2.
 
-Starts simulation + localization (SLAM or AMCL) + Nav2 + twist_stamper.
+Starts EasyNav only (costmap maps manager, AMCL, A* planner, Regulated Pure Pursuit). The
+simulation is started separately; the single entry point starts both:
+    ros2 launch caddy_ai2_ros2_sim sim.launch.py world:=navigation_test.sdf nav:=2d
 
-twist_stamper bridges:
-    /caddy_ai2/cmd_vel  (Twist, from Nav2)
-  → /caddy_ai2/bicycle_steering_controller/reference  (TwistStamped)
+EasyNav publishes TwistStamped directly (controller_node.use_cmd_vel_stamped), so it is
+remapped onto the bicycle_steering_controller reference input; no twist_stamper needed.
 
-Install if missing:
-    sudo apt install ros-jazzy-twist-stamper
+Usage (simulation already running):
+    ros2 launch caddy_ai2_ros2_navigation navigation.launch.py
 
-Usage — SLAM mode (build map while navigating):
-    ros2 launch caddy_ai2_ros2_navigation navigation.launch.py use_slam:=true
-
-Usage — AMCL mode (pre-built map):
+    # Another map (installed in a package's share dir, path relative to it):
     ros2 launch caddy_ai2_ros2_navigation navigation.launch.py \
-      map:=/full/path/to/maps/caddy_ai2_world.yaml
+      map_package:=my_maps_pkg map_file:=maps/my_map.yaml
+
+Goals: RViz "2D Goal Pose" (topic /goal_pose). Initial pose: RViz "2D Pose Estimate".
 """
 
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    nav_share  = get_package_share_directory('caddy_ai2_ros2_navigation')
-    sim_share  = get_package_share_directory('caddy_ai2_ros2_sim')
-    nav2_share = get_package_share_directory('nav2_bringup')
+    nav_share = get_package_share_directory('caddy_ai2_ros2_navigation')
 
-    default_nav2_params = os.path.join(nav_share, 'config', 'nav2_params.yaml')
-    default_slam_params = os.path.join(nav_share, 'config', 'slam_toolbox_params.yaml')
+    default_params = os.path.join(nav_share, 'config', 'easynav_params.yaml')
 
-    namespace    = LaunchConfiguration('namespace')
-    use_sim_time = LaunchConfiguration('use_sim_time')
-    map_yaml     = LaunchConfiguration('map')
-    use_slam     = LaunchConfiguration('use_slam')
-    nav2_params  = LaunchConfiguration('params_file')
-    slam_params  = LaunchConfiguration('slam_params_file')
-    include_sim  = LaunchConfiguration('include_sim')
-    autostart    = LaunchConfiguration('autostart')
-    world        = LaunchConfiguration('world')
+    params_file = LaunchConfiguration('params_file')
+    map_package = LaunchConfiguration('map_package')
+    map_file    = LaunchConfiguration('map_file')
 
     return LaunchDescription([
-        DeclareLaunchArgument('namespace',        default_value='caddy_ai2'),
-        DeclareLaunchArgument('use_sim_time',     default_value='true'),
-        DeclareLaunchArgument('map',              default_value='',
-                              description='Full path to map YAML (ignored when use_slam:=true)'),
-        DeclareLaunchArgument('use_slam',         default_value='false',
-                              description='true = slam_toolbox; false = AMCL with existing map'),
-        DeclareLaunchArgument('params_file',      default_value=default_nav2_params),
-        DeclareLaunchArgument('slam_params_file', default_value=default_slam_params),
-        DeclareLaunchArgument('include_sim',      default_value='true',
-                              description='Set false if simulation is already running'),
-        DeclareLaunchArgument('autostart',        default_value='true'),
-        DeclareLaunchArgument('world',            default_value='navigation_test.sdf'),
+        DeclareLaunchArgument('params_file', default_value=default_params),
+        DeclareLaunchArgument('map_package', default_value='caddy_ai2_ros2_navigation',
+                              description='Package whose share dir holds the map'),
+        DeclareLaunchArgument('map_file',    default_value='maps/navigation_test.yaml',
+                              description='Map YAML path, relative to map_package share dir'),
 
-        # ── Simulation ────────────────────────────────────────────────────────
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(sim_share, 'launch', 'sim_gazebo.launch.py')
-            ),
-            launch_arguments={
-                'namespace': namespace,
-                'world':     world,
-                'use_localization': 'true',
-            }.items(),
-            condition=IfCondition(include_sim),
-        ),
-
-        # ── Localization: Nav2 bringup (handles both SLAM and AMCL via use_slam arg) ──
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(nav2_share, 'launch', 'bringup_launch.py')
-            ),
-            launch_arguments={
-                'namespace':    namespace,
-                'use_sim_time': use_sim_time,
-                'autostart':    autostart,
-                'slam':         use_slam,
-                'map':          map_yaml,
-                'params_file':  nav2_params,
-            }.items(),
-        ),
-
-        # ── twist_stamper: Twist → TwistStamped adapter ───────────────────────
-        # Nav2 controller_server publishes Twist on /caddy_ai2/cmd_vel.
-        # bicycle_steering_controller expects TwistStamped on
-        # /caddy_ai2/bicycle_steering_controller/reference.
+        # ── EasyNav ───────────────────────────────────────────────────────────
+        # Runs unnamespaced on purpose: the params file is keyed by EasyNav's node names,
+        # and a namespace would also split /tf away from the global tree the EKF and the
+        # controllers publish to (same reasoning as the previous Nav2 setup).
+        # The robot is reached through absolute topics: the laser in easynav_params.yaml and
+        # the TwistStamped output remapped below.
         Node(
-            package='twist_stamper',
-            executable='twist_stamper',
-            name='twist_stamper',
-            namespace=namespace,
+            package='easynav_system',
+            executable='system_main',
             output='screen',
-            parameters=[{'use_sim_time': use_sim_time, 'frame_id': 'base_link'}],
+            # `-p node:param:=value` overrides the map only on maps_manager_node; a `parameters`
+            # entry would be keyed to this process name, not to EasyNav's inner nodes.
+            arguments=[
+                '--ros-args',
+                '--params-file', params_file,
+                '-p', ['maps_manager_node:costmap.package:=', map_package],
+                '-p', ['maps_manager_node:costmap.map_path_file:=', map_file],
+            ],
             remappings=[
-                ('cmd_vel_in',  'cmd_vel'),
-                ('cmd_vel_out', 'bicycle_steering_controller/reference'),
+                ('cmd_vel_stamped',
+                 '/caddy_ai2/bicycle_steering_controller/reference'),
             ],
         ),
     ])
