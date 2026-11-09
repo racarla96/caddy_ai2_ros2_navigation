@@ -12,7 +12,7 @@
         subscribers: [
           "/clock", "/tf", "/tf_static",
           "/caddy_ai2/sick_lms_291/scan",
-          "/caddy_ai2/rs_helios_5515/points_viz",
+          "/caddy_ai2/robot_description_rviz",
           "/planner_node/astar/path",
           "/localizer_node/amcl/particles",
         ],
